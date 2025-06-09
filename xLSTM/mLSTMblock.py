@@ -47,48 +47,45 @@ class mLSTMblock(nn.Module):
         
         self.init_states(x_example)
     
-    def init_states(self, x_example):
-        self.ct_1 = torch.zeros([1, 1, self.hidden_size], device=x_example.device)
-        self.nt_1 = torch.zeros([1, 1, self.hidden_size], device=x_example.device)
-    
     def forward(self, x):
-        assert x.ndim == 3
-        
-        x = self.ln(x) # layer norm on x
-        
-        left = self.left(x) # part left 
-        right = F.silu(self.right(x)) # part right with just swish (silu) function
+    assert x.ndim == 3
+    batch_size = x.size(0)
 
-        left_left = left.transpose(1, 2)
-        left_left = F.silu( self.drop( self.conv( left_left ).transpose(1, 2) ) )
-        l_skip = self.lskip(left_left)
+    x = self.ln(x)
+    
+    left = self.left(x)
+    right = F.silu(self.right(x))
+    
+    left_left = left.transpose(1, 2)
+    left_left = F.silu(self.drop(self.conv(left_left).transpose(1, 2)))
+    l_skip = self.lskip(left_left)
+    
+    q = self.dropq(self.wq(left_left))
+    k = self.dropk(self.wk(left_left))
+    v = self.dropv(self.wv(left))
+    
+    i = torch.exp(self.lni(self.i_gate(left_left)))
+    f = torch.exp(self.lnf(self.f_gate(left_left)))
+    o = torch.sigmoid(self.lno(self.o_gate(left_left)))
 
-        # start mLSTM
-        q = self.dropq(self.wq(left_left))
-        k = self.dropk(self.wk(left_left))
-        v = self.dropv(self.wv(left))
-        
-        i = torch.exp(self.lni(self.i_gate(left_left)))
-        f = torch.exp(self.lnf(self.f_gate(left_left)))
-        o = torch.sigmoid(self.lno(self.o_gate(left_left)))
+    # 状态扩展到 batch 维度
+    ct_1 = self.ct_1.repeat(batch_size, 1, 1)
+    nt_1 = self.nt_1.repeat(batch_size, 1, 1)
 
-        ct_1 = self.ct_1
-        ct = f*ct_1 + i*v*k
-        ct = torch.mean(self.ln_c(ct), [0, 1], keepdim=True)
-        self.ct_1 = ct.detach()
-        
-        nt_1 = self.nt_1
-        nt = f*nt_1 + i*k
-        nt =torch.mean( self.ln_n(nt), [0, 1], keepdim=True)
-        self.nt_1 = nt.detach()
-        
-        ht = o * ((ct*q) / torch.max(nt*q))
-        # end mLSTM
-        ht = ht
-        
-        left = self.drop2(self.GN(ht + l_skip))
-        
-        out = self.ln_out(left * right)
-        out = self.ln_proj(self.proj(out))
-        
-        return out
+    ct = f * ct_1 + i * v * k
+    ct = torch.mean(self.ln_c(ct), dim=1, keepdim=True)
+    self.ct_1 = torch.mean(ct, dim=0, keepdim=True).detach()
+
+    nt = f * nt_1 + i * k
+    nt = torch.mean(self.ln_n(nt), dim=1, keepdim=True)
+    self.nt_1 = torch.mean(nt, dim=0, keepdim=True).detach()
+
+    ht = o * ((ct * q) / torch.max(nt * q))
+    ht = ht
+
+    left = self.drop2(self.GN(ht + l_skip))
+
+    out = self.ln_out(left * right)
+    out = self.ln_proj(self.proj(out))
+
+    return out
